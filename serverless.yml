@@ -1,0 +1,123 @@
+service: realtime-serverless-chat
+
+frameworkVersion: '>=3.0.0'
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+  memorySize: 256
+  timeout: 15
+  logRetentionInDays: 14
+  versionFunctions: false
+  websocketsApiName: realtime-serverless-chat-${self:provider.stage}
+  websocketsApiRouteSelectionExpression: $request.body.action
+  websocketsDescription: Real-time serverless chat WebSocket API
+  environment:
+    CONNECTIONS_TABLE: chat-connections-${self:provider.stage}
+    HISTORY_TABLE: chat-history-${self:provider.stage}
+    ROOM_INDEX_NAME: RoomIndex
+    NODE_OPTIONS: --enable-source-maps
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:PutItem
+            - dynamodb:DeleteItem
+            - dynamodb:Scan
+            - dynamodb:Query
+          Resource:
+            - !GetAtt ConnectionsTable.Arn
+            - !Join
+              - '/'
+              - - !GetAtt ConnectionsTable.Arn
+                - 'index'
+                - 'RoomIndex'
+            - !GetAtt ChatHistoryTable.Arn
+        - Effect: Allow
+          Action:
+            - execute-api:ManageConnections
+          Resource:
+            - !Join
+              - ''
+              - - 'arn:aws:execute-api:${aws:region}:${aws:accountId}:'
+                - !Ref WebsocketsApi
+                - '/${self:provider.stage}/POST/@connections/*'
+
+package:
+  patterns:
+    - '!README.md'
+    - '!.git/**'
+    - '!.serverless/**'
+
+functions:
+  connectHandler:
+    handler: handler.connect
+    description: Stores the new WebSocket connectionId
+    events:
+      - websocket:
+          route: $connect
+
+  disconnectHandler:
+    handler: handler.disconnect
+    description: Removes the WebSocket connectionId
+    events:
+      - websocket:
+          route: $disconnect
+
+  sendMessageHandler:
+    handler: sendMessage.handler
+    description: Persists a chat message and broadcasts it to all connections
+    events:
+      - websocket:
+          route: sendMessage
+
+resources:
+  Resources:
+    ConnectionsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: chat-connections-${self:provider.stage}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: connectionId
+            AttributeType: S
+          - AttributeName: chatRoomId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: connectionId
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: RoomIndex
+            KeySchema:
+              - AttributeName: chatRoomId
+                KeyType: HASH
+            Projection:
+              ProjectionType: KEYS_ONLY
+
+    ChatHistoryTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: chat-history-${self:provider.stage}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: chatRoomId
+            AttributeType: S
+          - AttributeName: timestamp
+            AttributeType: S
+        KeySchema:
+          - AttributeName: chatRoomId
+            KeyType: HASH
+          - AttributeName: timestamp
+            KeyType: RANGE
+
+  Outputs:
+    WebSocketUrl:
+      Description: WebSocket endpoint URL
+      Value: !Join
+        - ''
+        - - 'wss://'
+          - !Ref WebsocketsApi
+          - '.execute-api.${aws:region}.amazonaws.com/${self:provider.stage}'
